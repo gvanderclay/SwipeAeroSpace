@@ -10,6 +10,7 @@ enum SettingKey {
     static let maxSteps = "maxSteps"
     static let swipeUpOverview = "swipeUpOverview"
     static let swipeUpFingers = "swipeUpFingers"
+    static let gesturesEnabled = "gesturesEnabled"
     static let menuBarExtraIsInserted = "menuBarExtraIsInserted"
 
     static let legacyNatural = "natrual"
@@ -25,6 +26,7 @@ enum SettingDefaults {
     static let maxSteps = 5
     static let swipeUpOverview = true
     static let swipeUpFingers = FingerCount.three.rawValue
+    static let gesturesEnabled = true
     static let menuBarExtraIsInserted = true
 }
 

@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage(SettingKey.maxSteps) private var maxSteps: Int = SettingDefaults.maxSteps
     @AppStorage(SettingKey.swipeUpOverview) private var swipeUpOverviewEnabled: Bool = SettingDefaults.swipeUpOverview
     @AppStorage(SettingKey.swipeUpFingers) private var swipeUpFingers: String = SettingDefaults.swipeUpFingers
+    @AppStorage(SettingKey.gesturesEnabled) private var gesturesEnabled: Bool = SettingDefaults.gesturesEnabled
 
     @State private var numberFormatter: NumberFormatter = {
         var nf = NumberFormatter()
@@ -163,6 +164,14 @@ struct SettingsView: View {
             // MARK: - General
             sectionHeader("General")
             VStack(alignment: .leading, spacing: 12) {
+                settingRow(
+                    title: "Enable Gestures",
+                    description: "Turn off trackpad swipe detection without quitting the app"
+                ) {
+                    Toggle("", isOn: $gesturesEnabled)
+                        .labelsHidden()
+                }
+
                 LaunchAtLogin.Toggle {
                     Text("Launch at Login")
                 }

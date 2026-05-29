@@ -135,6 +135,7 @@ class SwipeManager {
     @AppStorage(SettingKey.maxSteps) private var maxSteps: Int = SettingDefaults.maxSteps
     @AppStorage(SettingKey.swipeUpOverview) private var swipeUpOverviewEnabled: Bool = SettingDefaults.swipeUpOverview
     @AppStorage(SettingKey.swipeUpFingers) private var swipeUpFingers: String = SettingDefaults.swipeUpFingers
+    @AppStorage(SettingKey.gesturesEnabled) private var gesturesEnabled: Bool = SettingDefaults.gesturesEnabled
 
     var socketInfo = SocketInfo()
 
@@ -748,6 +749,14 @@ class SwipeManager {
     }
 
     private func processTouches(touches: Set<NSTouch>, count: Int) {
+        guard gesturesEnabled else {
+            pendingSwipeWork?.cancel()
+            pendingSwipeWork = nil
+            state = .ended
+            clearEventState()
+            return
+        }
+
         let hFingerCount = FingerCount(rawValue: fingers)?.count ?? FingerCount.three.count
         let vFingerCount = FingerCount(rawValue: swipeUpFingers)?.count ?? FingerCount.three.count
         let (disX, disY, _) = swipeDistance(touches: touches)

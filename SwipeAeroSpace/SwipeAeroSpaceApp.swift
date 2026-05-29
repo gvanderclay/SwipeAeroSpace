@@ -50,6 +50,7 @@ struct SwipeAeroSpaceApp: App {
     @AppStorage(SettingKey.fingers) private var fingers: String = SettingDefaults.fingers
     @AppStorage(SettingKey.swipeUpOverview) private var swipeUpOverviewEnabled: Bool = SettingDefaults.swipeUpOverview
     @AppStorage(SettingKey.swipeUpFingers) private var swipeUpFingers: String = SettingDefaults.swipeUpFingers
+    @AppStorage(SettingKey.gesturesEnabled) private var gesturesEnabled: Bool = SettingDefaults.gesturesEnabled
     @Environment(\.openWindow) private var openWindow
     @State var swipeManager: SwipeManager
     @StateObject private var socketInfo: SocketInfo
@@ -83,9 +84,22 @@ struct SwipeAeroSpaceApp: App {
             }
             Divider()
 
-            Text("Horizontal: \(horizontalFingerDisplay)-finger swipe")
+            Button(gesturesEnabled ? "Pause Gestures" : "Resume Gestures") {
+                gesturesEnabled.toggle()
+            }
+            Divider()
+
+            Text(
+                gesturesEnabled
+                    ? "Horizontal: \(horizontalFingerDisplay)-finger swipe"
+                    : "Horizontal: paused"
+            )
             if swipeUpOverviewEnabled {
-                Text("Overview: \(overviewFingerDisplay)-finger swipe up")
+                Text(
+                    gesturesEnabled
+                        ? "Overview: \(overviewFingerDisplay)-finger swipe up"
+                        : "Overview: paused"
+                )
             }
             Divider()
 
