@@ -44,8 +44,53 @@ func checkAccessibilityPermissions() {
     }
 }
 
+extension Notification.Name {
+    /// Posted when an external `swipeaerospace://toggle-overview` URL is received.
+    static let swipeAeroSpaceToggleOverview = Notification.Name(
+        "swipeAeroSpaceToggleOverview"
+    )
+}
+
+/// Handles incoming custom-scheme URLs (e.g. fired from an AeroSpace
+/// `exec-and-forget open -g "swipeaerospace://toggle-overview"` keybinding).
+/// As an agent (LSUIElement) app, the reliable path is the GetURL Apple Event.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+    }
+
+    @objc private func handleURLEvent(
+        _ event: NSAppleEventDescriptor,
+        withReplyEvent: NSAppleEventDescriptor
+    ) {
+        guard
+            let urlString = event.paramDescriptor(
+                forKeyword: AEKeyword(keyDirectObject)
+            )?.stringValue,
+            let url = URL(string: urlString)
+        else { return }
+
+        // Action is the URL host, e.g. swipeaerospace://toggle-overview
+        switch url.host {
+        case "toggle-overview":
+            NotificationCenter.default.post(
+                name: .swipeAeroSpaceToggleOverview,
+                object: nil
+            )
+        default:
+            break
+        }
+    }
+}
+
 @main
 struct SwipeAeroSpaceApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage(SettingKey.menuBarExtraIsInserted) var menuBarExtraIsInserted = SettingDefaults.menuBarExtraIsInserted
     @AppStorage(SettingKey.fingers) private var fingers: String = SettingDefaults.fingers
     @AppStorage(SettingKey.swipeUpOverview) private var swipeUpOverviewEnabled: Bool = SettingDefaults.swipeUpOverview

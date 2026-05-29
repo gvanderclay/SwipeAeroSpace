@@ -165,6 +165,7 @@ class SwipeManager {
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
     private let workQueueKey = DispatchSpecificKey<Void>()
     private let overlayController = OverlayPanelController()
+    private var overviewToggleObserver: NSObjectProtocol?
 
     private var logger: Logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
@@ -356,6 +357,20 @@ class SwipeManager {
             "list-workspaces", "--monitor", "focused", "--empty", "no",
         ]
         return runCommand(args: args, stdin: "")
+    }
+
+    /// Toggle the workspace overview overlay. Triggered by the
+    /// `swipeaerospace://toggle-overview` URL (see AppDelegate). Safe from any thread.
+    func toggleWorkspaceOverview() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.toggleWorkspaceOverview() }
+            return
+        }
+        if overlayController.isVisible {
+            overlayController.dismiss()
+        } else {
+            showWorkspaceOverview()
+        }
     }
 
     func showWorkspaceOverview() {
@@ -612,6 +627,7 @@ class SwipeManager {
             return
         }
         logger.info("SwipeManager start")
+        registerOverviewToggleObserver()
         eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
@@ -649,8 +665,23 @@ class SwipeManager {
     /// Must be called from the main thread (menubar Quit / deinit). It uses
     /// `workQueue.sync` for connection teardown while `stopEventTap()` uses
     /// `DispatchQueue.main.sync`; calling this from `workQueue` would deadlock.
+    private func registerOverviewToggleObserver() {
+        guard overviewToggleObserver == nil else { return }
+        overviewToggleObserver = NotificationCenter.default.addObserver(
+            forName: .swipeAeroSpaceToggleOverview,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.toggleWorkspaceOverview()
+        }
+    }
+
     func stop() {
         logger.info("stop the app")
+        if let observer = overviewToggleObserver {
+            NotificationCenter.default.removeObserver(observer)
+            overviewToggleObserver = nil
+        }
         stopEventTap()
 
         if isOnWorkQueue {
