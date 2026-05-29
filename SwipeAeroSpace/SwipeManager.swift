@@ -94,6 +94,9 @@ class SwipeManager {
     // user settings
     @AppStorage(SettingKey.threshold) private var swipeThreshold: Double = SettingDefaults.threshold
     private var internalThreshold: Float { Float(swipeThreshold) * 0.05 }
+    // Tunable: require more deliberate movement before committing to an axis.
+    private let axisLockThresholdFactor: Float = 0.6
+    private let stableFingerCountFrames: Int = 2
     @AppStorage(SettingKey.wrap) private var wrapWorkspace: Bool = SettingDefaults.wrap
     @AppStorage(SettingKey.natural) private var naturalSwipe: Bool = SettingDefaults.natural
     @AppStorage(SettingKey.skipEmpty) private var skipEmpty: Bool = SettingDefaults.skipEmpty
@@ -115,6 +118,8 @@ class SwipeManager {
     private var state: GestureState = .ended
     private var swipeAxis: SwipeAxis = .undecided
     private var activeFingerCount: Int = 0
+    private var pendingCount: Int = 0
+    private var pendingCountFrames: Int = 0
     private var gestureFocusDone: Bool = false
     private var pendingSwipeWork: DispatchWorkItem? = nil
     private var cachedNonEmptyWorkspaces: String? = nil
@@ -643,8 +648,8 @@ class SwipeManager {
         if touches.isEmpty {
             return
         }
-        let touchesCount =
-            touches.allSatisfy({ $0.phase == .ended }) ? 0 : touches.count
+        let active = touches.filter { NSTouch.Phase.touching.contains($0.phase) }
+        let touchesCount = active.count
         if touchesCount == 0 {
             stopGesture()
         } else {
@@ -659,38 +664,60 @@ class SwipeManager {
                 handleGesture()
             }
             clearEventState()
+        } else {
+            state = .ended
+            clearEventState()
         }
     }
 
     private func processTouches(touches: Set<NSTouch>, count: Int) {
         let hFingerCount = FingerCount(rawValue: fingers)?.count ?? FingerCount.three.count
         let vFingerCount = FingerCount(rawValue: swipeUpFingers)?.count ?? FingerCount.three.count
-        if state != .began && (count == hFingerCount || count == vFingerCount) {
-            state = .began
-            activeFingerCount = count
+        let (disX, disY, _) = swipeDistance(touches: touches)
+
+        // Arm on the number of fingers actually on the trackpad (contacts in a
+        // touching phase; .ended/.cancelled are already excluded upstream).
+        // Contact count is stable at the target, unlike the per-frame "moving"
+        // count, which jitters as individual fingers go .stationary mid-swipe —
+        // arming on the moving count made multi-finger swipes fail to trigger.
+        if state != .began {
+            let canArmHorizontal = count >= hFingerCount
+            let canArmVertical = swipeUpOverviewEnabled && count >= vFingerCount
+            if !canArmHorizontal && !canArmVertical {
+                pendingCount = 0
+                pendingCountFrames = 0
+            } else if pendingCount == count {
+                pendingCountFrames += 1
+                if pendingCountFrames >= stableFingerCountFrames {
+                    // Debounced: the contact count held at the target long enough.
+                    state = .began
+                    activeFingerCount = count
+                }
+            } else {
+                pendingCount = count
+                pendingCountFrames = 1
+            }
         }
-        // Update finger count while axis is still undecided — touch count
-        // can fluctuate as fingers land, so use the latest stable count
-        if state == .began && swipeAxis == .undecided {
-            activeFingerCount = count
-        }
+
         if state == .began {
-            let (disX, disY) = swipeDistance(touches: touches)
             accDisX += disX
             accDisY += disY
 
-            // Lock axis once we have enough movement
+            // Lock axis once we have enough deliberate movement. Resting/typing
+            // fingers contribute no distance (swipeDistance counts only .moved),
+            // and the raised threshold keeps incidental drift from locking.
             if swipeAxis == .undecided {
-                let threshold = internalThreshold * 0.3
+                let threshold = internalThreshold * axisLockThresholdFactor
                 if abs(accDisX) > threshold || abs(accDisY) > threshold {
                     swipeAxis =
                         abs(accDisY) > abs(accDisX) ? .vertical : .horizontal
                 }
             }
 
-            // Vertical swipes: only fire if finger count matches overview setting
+            // The configured finger count is a minimum on both axes; axis lock
+            // decides the gesture when horizontal and vertical settings both match.
             if swipeAxis == .vertical && swipeUpOverviewEnabled
-                && activeFingerCount == vFingerCount
+                && activeFingerCount >= vFingerCount
             {
                 let threshold = internalThreshold * 0.5
                 if !swipeUpFired && accDisY > threshold {
@@ -718,7 +745,9 @@ class SwipeManager {
             }
 
             // Only fire horizontal workspace switches for horizontal swipes
-            if swipeAxis == .horizontal && multiSwipeEnabled {
+            if swipeAxis == .horizontal && activeFingerCount >= hFingerCount
+                && multiSwipeEnabled
+            {
                 let threshold = internalThreshold
                 let rawPosition = Int(accDisX / threshold)
                 let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
@@ -803,6 +832,8 @@ class SwipeManager {
         swipeUpFired = false
         swipeAxis = .undecided
         activeFingerCount = 0
+        pendingCount = 0
+        pendingCountFrames = 0
         gestureFocusDone = false
         cachedNonEmptyWorkspaces = nil
         prevTouchPositions.removeAll()
@@ -811,6 +842,10 @@ class SwipeManager {
     private func handleGesture() {
         // If multi-swipe is enabled, switches already fired live during the gesture
         if multiSwipeEnabled {
+            return
+        }
+        let hFingerCount = FingerCount(rawValue: fingers)?.count ?? FingerCount.three.count
+        if activeFingerCount < hFingerCount {
             return
         }
         let threshold = internalThreshold
@@ -833,47 +868,54 @@ class SwipeManager {
         }
     }
 
-    private func swipeDistance(touches: Set<NSTouch>) -> (Float, Float) {
+    private func swipeDistance(touches: Set<NSTouch>) -> (Float, Float, Int) {
         var allRight = true
         var allLeft = true
         var allUp = true
         var allDown = true
         var sumDisX = Float(0)
         var sumDisY = Float(0)
-        var activeTouches = 0
+        var movingTouches = 0
         for touch in touches {
             let (disX, disY) = touchDistance(touch)
-            allRight = allRight && disX >= 0
-            allLeft = allLeft && disX <= 0
-            allUp = allUp && disY >= 0
-            allDown = allDown && disY <= 0
-            sumDisX += disX
-            sumDisY += disY
 
-            if touch.phase == .ended {
+            if touch.phase == .ended || touch.phase == .cancelled {
                 prevTouchPositions.removeValue(forKey: "\(touch.identity)")
             } else {
                 prevTouchPositions["\(touch.identity)"] =
                     touch.normalizedPosition
-                activeTouches += 1
+            }
+
+            if touch.phase == .moved {
+                allRight = allRight && disX >= 0
+                allLeft = allLeft && disX <= 0
+                allUp = allUp && disY >= 0
+                allDown = allDown && disY <= 0
+                sumDisX += disX
+                sumDisY += disY
+                movingTouches += 1
             }
         }
 
         // Average across fingers so threshold behaves consistently
         // regardless of finger count
-        let count = max(activeTouches, 1)
+        let count = max(movingTouches, 1)
         var resultX = sumDisX / Float(count)
         var resultY = sumDisY / Float(count)
 
         // All fingers should move in the same direction for each axis.
-        if !allRight && !allLeft {
+        let horizontalIsCoherent = allRight || allLeft
+        let verticalIsCoherent = allUp || allDown
+        if !horizontalIsCoherent {
             resultX = 0
         }
-        if !allUp && !allDown {
+        if !verticalIsCoherent {
             resultY = 0
         }
 
-        return (resultX, resultY)
+        let coherentMovingTouches =
+            horizontalIsCoherent || verticalIsCoherent ? movingTouches : 0
+        return (resultX, resultY, coherentMovingTouches)
     }
 
     private func touchDistance(_ touch: NSTouch) -> (Float, Float) {
