@@ -106,6 +106,7 @@ class SwipeManager {
     var socketInfo = SocketInfo()
 
     private var eventTap: CFMachPort? = nil
+    private var runLoopSource: CFRunLoopSource? = nil
     private var accDisX: Float = 0
     private var accDisY: Float = 0
     private var swipeUpFired: Bool = false
@@ -118,6 +119,15 @@ class SwipeManager {
     private var pendingSwipeWork: DispatchWorkItem? = nil
     private var cachedNonEmptyWorkspaces: String? = nil
     private var socket: Socket? = nil
+    private var reconnecting: Bool = false
+    private var reconnectWorkItem: DispatchWorkItem? = nil
+    private var reconnectGeneration: Int = 0
+    private var healthCheckWorkItem: DispatchWorkItem? = nil
+    private var healthCheckGeneration: Int = 0
+    private var isStopping: Bool = false
+    private let initialReconnectDelay: TimeInterval = 1
+    private let maxReconnectDelay: TimeInterval = 30
+    private let healthCheckInterval: TimeInterval = 5
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
     private let overlayController = OverlayPanelController()
 
@@ -126,10 +136,121 @@ class SwipeManager {
         category: "Info"
     )
 
+    deinit {
+        stop()
+    }
+
+    private func setSocketConnected(_ connected: Bool) {
+        if Thread.isMainThread {
+            socketInfo.socketConnected = connected
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.socketInfo.socketConnected = connected
+            }
+        }
+    }
+
+    private func handleConnectionFailure() {
+        socket?.close()
+        socket = nil
+        stopHealthChecks()
+        setSocketConnected(false)
+        startReconnectLoop()
+    }
+
+    private func startReconnectLoop() {
+        guard !isStopping else { return }
+        guard !reconnecting else { return }
+
+        reconnecting = true
+        reconnectGeneration += 1
+        scheduleReconnect(after: initialReconnectDelay, generation: reconnectGeneration)
+    }
+
+    private func scheduleReconnect(after delay: TimeInterval, generation: Int) {
+        guard !isStopping else {
+            reconnecting = false
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            guard !self.isStopping,
+                self.reconnecting,
+                self.reconnectGeneration == generation
+            else {
+                return
+            }
+
+            self.logger.info("Trying reconnect socket...")
+            if self.connectSocket(reconnect: true) {
+                return
+            }
+
+            let nextDelay = min(delay * 2, self.maxReconnectDelay)
+            self.scheduleReconnect(after: nextDelay, generation: generation)
+        }
+
+        reconnectWorkItem = workItem
+        workQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func stopReconnectLoop() {
+        reconnectGeneration += 1
+        reconnecting = false
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+    }
+
+    private func startHealthChecks() {
+        guard !isStopping else { return }
+
+        healthCheckGeneration += 1
+        healthCheckWorkItem?.cancel()
+        scheduleHealthCheck(generation: healthCheckGeneration)
+    }
+
+    private func scheduleHealthCheck(generation: Int) {
+        guard !isStopping else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            guard !self.isStopping,
+                self.healthCheckGeneration == generation,
+                self.socket != nil,
+                !self.reconnecting
+            else {
+                return
+            }
+
+            _ = self.runCommand(args: ["list-workspaces", "--focused"], stdin: "")
+
+            guard !self.isStopping,
+                self.healthCheckGeneration == generation,
+                self.socket != nil,
+                !self.reconnecting
+            else {
+                return
+            }
+
+            self.scheduleHealthCheck(generation: generation)
+        }
+
+        healthCheckWorkItem = workItem
+        workQueue.asyncAfter(deadline: .now() + healthCheckInterval, execute: workItem)
+    }
+
+    private func stopHealthChecks() {
+        healthCheckGeneration += 1
+        healthCheckWorkItem?.cancel()
+        healthCheckWorkItem = nil
+    }
+
     private func runCommand(args: [String], stdin: String, retry: Bool = false)
         -> Result<String, SwipeError>
     {
         guard let socket = socket else {
+            handleConnectionFailure()
             return .failure(.SocketError("No socket created"))
         }
         do {
@@ -160,11 +281,14 @@ class SwipeManager {
             // if we encouter the socket error
             // try reconnect the socket and rerun the command only once.
             if retry {
+                handleConnectionFailure()
                 return .failure(.SocketError(socketError.localizedDescription))
             }
             logger.info("Trying reconnect socket...")
-            connectSocket(reconnect: true)
-            return runCommand(args: args, stdin: stdin, retry: true)
+            if connectSocket(reconnect: true) {
+                return runCommand(args: args, stdin: stdin, retry: true)
+            }
+            return .failure(.SocketError(socketError.localizedDescription))
         }
     }
 
@@ -376,24 +500,48 @@ class SwipeManager {
 
     }
 
-    func connectSocket(reconnect: Bool = false) {
+    @discardableResult
+    func connectSocket(reconnect: Bool = false) -> Bool {
+        guard !isStopping else { return false }
+
         if socket != nil && !reconnect {
             logger.warning("socket is connected")
-            return
+            return true
         }
 
         let socket_path = "/tmp/bobko.aerospace-\(NSUserName()).sock"
+        var newSocket: Socket?
         do {
-            socket = try Socket.create(
+            if reconnect {
+                socket?.close()
+                socket = nil
+            }
+
+            newSocket = try Socket.create(
                 family: .unix,
                 type: .stream,
                 proto: .unix
             )
-            try socket?.connect(to: socket_path)
-            socketInfo.socketConnected = true
+            try newSocket?.connect(to: socket_path)
+            guard !isStopping else {
+                newSocket?.close()
+                return false
+            }
+            socket = newSocket
+            stopReconnectLoop()
+            setSocketConnected(true)
+            startHealthChecks()
             logger.info("connect to socket \(socket_path)")
+            return true
         } catch let error {
+            newSocket?.close()
+            socket?.close()
+            socket = nil
+            stopHealthChecks()
+            setSocketConnected(false)
             logger.error("Unexpected error: \(error.localizedDescription)")
+            startReconnectLoop()
+            return false
         }
     }
 
@@ -402,6 +550,7 @@ class SwipeManager {
             logger.warning("SwipeManager is already started")
             return
         }
+        isStopping = false
         logger.info("SwipeManager start")
         eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
@@ -424,7 +573,7 @@ class SwipeManager {
             return
         }
 
-        let runLoopSource = CFMachPortCreateRunLoopSource(nil, eventTap, 0)
+        runLoopSource = CFMachPortCreateRunLoopSource(nil, eventTap, 0)
         CFRunLoopAddSource(
             CFRunLoopGetCurrent(),
             runLoopSource,
@@ -437,7 +586,29 @@ class SwipeManager {
 
     func stop() {
         logger.info("stop the app")
+        isStopping = true
+        stopReconnectLoop()
+        stopHealthChecks()
+
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let runLoopSource = runLoopSource {
+            CFRunLoopRemoveSource(
+                CFRunLoopGetCurrent(),
+                runLoopSource,
+                CFRunLoopMode.commonModes
+            )
+        }
+        if let tap = eventTap {
+            CFMachPortInvalidate(tap)
+        }
+        eventTap = nil
+        runLoopSource = nil
+
         socket?.close()
+        socket = nil
+        setSocketConnected(false)
     }
 
     private func eventHandler(
