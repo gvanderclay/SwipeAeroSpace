@@ -373,8 +373,14 @@ class OverlayPanelController {
     private var panel: NSPanel?
     private var localMonitor: Any?
     private var globalMonitor: Any?
+    // Active only while the overview is open. Intercepts navigation keys above
+    // the app layer so they keep working even if a focused app (e.g. an emulator)
+    // steals key focus — which an NSEvent local monitor cannot survive.
+    private var keyEventTap: CFMachPort?
+    private var keyRunLoopSource: CFRunLoopSource?
     private var onDismissCallback: (() -> Void)?
     private var onSelectCallback: ((String) -> Void)?
+    private var onPreviewCallback: ((String) -> Void)?
     private let overlayState = OverlayState()
 
     func show(
@@ -395,6 +401,7 @@ class OverlayPanelController {
             self?.dismiss()
         }
         self.onSelectCallback = selectHandler
+        self.onPreviewCallback = onPreview
         overlayState.workspaces = workspaces
 
         let view = WorkspaceOverlayView(
@@ -459,9 +466,23 @@ class OverlayPanelController {
         localMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .leftMouseDown, .rightMouseDown]
         ) { [weak self] event in
-            if event.type == .keyDown && event.keyCode == 53 {
-                self?.dismiss()
-                return nil
+            if event.type == .keyDown {
+                switch event.keyCode {
+                case 53:  // Escape — revert and dismiss
+                    self?.dismiss()
+                    return nil
+                case 123, 126:  // Left / Up — previous workspace
+                    self?.moveSelection(by: -1)
+                    return nil
+                case 124, 125:  // Right / Down — next workspace
+                    self?.moveSelection(by: 1)
+                    return nil
+                case 36, 76:  // Return / keypad Enter — commit highlighted
+                    self?.selectHighlighted()
+                    return nil
+                default:
+                    break
+                }
             }
             if event.type == .leftMouseDown || event.type == .rightMouseDown {
                 let screenPoint = NSEvent.mouseLocation
@@ -490,6 +511,110 @@ class OverlayPanelController {
                 self?.dismiss()
             }
         }
+
+        installKeyEventTap()
+    }
+
+    /// Intercept navigation keys at the CGEvent layer (above app focus) so the
+    /// overview stays keyboard-drivable even after a previewed app steals focus.
+    private func installKeyEventTap() {
+        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+        guard
+            let tap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: mask,
+                callback: { _, type, event, userInfo in
+                    guard let userInfo = userInfo else {
+                        return Unmanaged.passUnretained(event)
+                    }
+                    let controller = Unmanaged<OverlayPanelController>
+                        .fromOpaque(userInfo).takeUnretainedValue()
+                    return controller.handleKeyTap(type: type, event: event)
+                },
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            )
+        else { return }
+
+        keyEventTap = tap
+        let source = CFMachPortCreateRunLoopSource(nil, tap, 0)
+        keyRunLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func removeKeyEventTap() {
+        if let tap = keyEventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            if let source = keyRunLoopSource {
+                CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+            }
+            CFMachPortInvalidate(tap)
+        }
+        keyEventTap = nil
+        keyRunLoopSource = nil
+    }
+
+    /// CGEvent tap callback (main run loop). Consumes navigation keys while the
+    /// overview is visible; passes everything else through.
+    fileprivate func handleKeyTap(
+        type: CGEventType,
+        event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = keyEventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard type == .keyDown, isVisible else {
+            return Unmanaged.passUnretained(event)
+        }
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        switch keyCode {
+        case 53:  // Escape — revert and dismiss
+            dismiss()
+            return nil
+        case 123, 126:  // Left / Up — previous workspace
+            moveSelection(by: -1)
+            return nil
+        case 124, 125:  // Right / Down — next workspace
+            moveSelection(by: 1)
+            return nil
+        case 36, 76:  // Return / keypad Enter — commit highlighted
+            selectHighlighted()
+            return nil
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+    }
+
+    /// Move the keyboard highlight by `delta` (wrapping) and live-preview it,
+    /// mirroring the hover/swipe behavior. Starts from the highlighted workspace,
+    /// else the currently focused one, else the first.
+    private func moveSelection(by delta: Int) {
+        let workspaces = overlayState.workspaces
+        guard !workspaces.isEmpty else { return }
+        let currentIndex: Int
+        if let hovered = overlayState.hoveredWorkspace,
+            let idx = workspaces.firstIndex(where: { $0.id == hovered })
+        {
+            currentIndex = idx
+        } else if let idx = workspaces.firstIndex(where: { $0.isFocused }) {
+            currentIndex = idx
+        } else {
+            currentIndex = 0
+        }
+        let count = workspaces.count
+        let newIndex = ((currentIndex + delta) % count + count) % count
+        let target = workspaces[newIndex].id
+        overlayState.hoveredWorkspace = target
+        onPreviewCallback?(target)
+    }
+
+    /// Commit the highlighted workspace (Return). No-op if nothing is highlighted.
+    private func selectHighlighted() {
+        guard let ws = overlayState.hoveredWorkspace else { return }
+        onSelectCallback?(ws)
     }
 
     func update(workspaces: [WorkspaceInfo]) {
@@ -503,9 +628,11 @@ class OverlayPanelController {
     func dismiss() {
         guard isVisible else { return }
         isVisible = false
+        removeKeyEventTap()
         onDismissCallback?()
         onDismissCallback = nil
         onSelectCallback = nil
+        onPreviewCallback = nil
         overlayState.hoveredWorkspace = nil
         overlayState.focusedMonitorId = nil
 
