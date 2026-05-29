@@ -37,7 +37,7 @@ enum SwipeError: Error {
     case Unknown(String)
 }
 
-public struct ClientRequest: Codable, Sendable {
+public struct ClientRequest: Encodable, Sendable {
     public let command: String
     public let args: [String]
     public let stdin: String
@@ -55,6 +55,31 @@ public struct ClientRequest: Codable, Sendable {
         self.stdin = stdin
         self.windowId = windowId
         self.workspace = workspace
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case command
+        case args
+        case stdin
+        case windowId
+        case workspace
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(command, forKey: .command)
+        try container.encode(args, forKey: .args)
+        try container.encode(stdin, forKey: .stdin)
+        if let windowId {
+            try container.encode(windowId, forKey: .windowId)
+        } else {
+            try container.encodeNil(forKey: .windowId)
+        }
+        if let workspace {
+            try container.encode(workspace, forKey: .workspace)
+        } else {
+            try container.encodeNil(forKey: .workspace)
+        }
     }
 }
 
@@ -79,6 +104,11 @@ public struct ServerAnswer: Codable, Sendable {
 
 class SocketInfo: ObservableObject {
     @Published var socketConnected: Bool = false
+}
+
+private enum SocketTransportError: Error {
+    case timeout(milliseconds: UInt)
+    case connectionClosed
 }
 
 extension Result {
@@ -123,11 +153,12 @@ class SwipeManager {
     private var gestureFocusDone: Bool = false
     private var pendingSwipeWork: DispatchWorkItem? = nil
     private var cachedNonEmptyWorkspaces: String? = nil
-    private var socket: Socket? = nil
+    private var connectionHealthy: Bool = false
     private var reconnecting: Bool = false
     private var reconnectWorkItem: DispatchWorkItem? = nil
     private var reconnectGeneration: Int = 0
     private var isStopping: Bool = false
+    private let socketReadTimeoutMilliseconds: UInt = 5_000
     private let initialReconnectDelay: TimeInterval = 1
     private let maxReconnectDelay: TimeInterval = 30
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
@@ -152,6 +183,7 @@ class SwipeManager {
     }
 
     private func setSocketConnected(_ connected: Bool) {
+        connectionHealthy = connected
         if Thread.isMainThread {
             socketInfo.socketConnected = connected
         } else {
@@ -162,8 +194,6 @@ class SwipeManager {
     }
 
     private func handleConnectionFailure() {
-        socket?.close()
-        socket = nil
         setSocketConnected(false)
         startReconnectLoop()
     }
@@ -215,31 +245,28 @@ class SwipeManager {
     private func runCommand(args: [String], stdin: String, retry: Bool = false)
         -> Result<String, SwipeError>
     {
-        guard let socket = socket else {
-            handleConnectionFailure()
-            return .failure(.SocketError("No socket created"))
-        }
         do {
+            // AeroSpace 0.20.x has no per-message framing; its CLI uses a fresh
+            // socket per command, which avoids cross-command stream desync here.
+            let socket = try createSocket()
+            defer {
+                socket.close()
+            }
             let request = try JSONEncoder().encode(
                 ClientRequest(args: args, stdin: stdin, windowId: nil, workspace: nil)
             )
             try socket.write(from: request)
-            let _ = try Socket.wait(
-                for: [socket],
-                timeout: 0,
-                waitForever: true
-            )
-            var answer = Data()
-            try socket.read(into: &answer)
-            let result = try JSONDecoder().decode(
-                ServerAnswer.self,
-                from: answer
-            )
+            let result = try readServerAnswer(from: socket)
+            stopReconnectLoop()
+            setSocketConnected(true)
             if result.exitCode != 0 {
                 return .failure(.CommandFail(result.stderr))
             }
             return .success(result.stdout)
 
+        } catch let error as SocketTransportError {
+            handleConnectionFailure()
+            return .failure(.SocketError(socketTransportErrorMessage(error)))
         } catch let error {
             guard let socketError = error as? Socket.Error else {
                 return .failure(.Unknown(error.localizedDescription))
@@ -255,6 +282,71 @@ class SwipeManager {
                 return runCommand(args: args, stdin: stdin, retry: true)
             }
             return .failure(.SocketError(socketError.localizedDescription))
+        }
+    }
+
+    private var socketPath: String {
+        "/tmp/bobko.aerospace-\(NSUserName()).sock"
+    }
+
+    private func createSocket() throws -> Socket {
+        let newSocket = try Socket.create(
+            family: .unix,
+            type: .stream,
+            proto: .unix
+        )
+        do {
+            try newSocket.connect(to: socketPath)
+            return newSocket
+        } catch {
+            newSocket.close()
+            throw error
+        }
+    }
+
+    private func readServerAnswer(from socket: Socket) throws -> ServerAnswer {
+        let deadline = Date().addingTimeInterval(
+            TimeInterval(socketReadTimeoutMilliseconds) / 1_000
+        )
+        var answer = Data()
+
+        while true {
+            try waitForServerAnswer(on: socket, until: deadline)
+            let bytesRead = try socket.read(into: &answer)
+            guard bytesRead > 0 else {
+                throw SocketTransportError.connectionClosed
+            }
+            if let result = try? JSONDecoder().decode(ServerAnswer.self, from: answer) {
+                return result
+            }
+        }
+    }
+
+    private func waitForServerAnswer(on socket: Socket, until deadline: Date) throws {
+        let remainingSeconds = deadline.timeIntervalSinceNow
+        guard remainingSeconds > 0 else {
+            throw SocketTransportError.timeout(milliseconds: socketReadTimeoutMilliseconds)
+        }
+        let remainingMilliseconds = max(
+            UInt(1),
+            UInt(ceil(remainingSeconds * 1_000))
+        )
+        let readableSockets = try Socket.wait(
+            for: [socket],
+            timeout: remainingMilliseconds,
+            waitForever: false
+        )
+        guard readableSockets?.isEmpty == false else {
+            throw SocketTransportError.timeout(milliseconds: socketReadTimeoutMilliseconds)
+        }
+    }
+
+    private func socketTransportErrorMessage(_ error: SocketTransportError) -> String {
+        switch error {
+        case .timeout(let milliseconds):
+            "Timed out waiting for AeroSpace response after \(milliseconds) ms"
+        case .connectionClosed:
+            "AeroSpace socket closed before sending a complete response"
         }
     }
 
@@ -487,37 +579,25 @@ class SwipeManager {
     private func connectSocketOnWorkQueue(reconnect: Bool = false) -> Bool {
         guard !isStopping else { return false }
 
-        if socket != nil && !reconnect {
+        if connectionHealthy && !reconnect {
             logger.warning("socket is connected")
             return true
         }
 
-        let socket_path = "/tmp/bobko.aerospace-\(NSUserName()).sock"
         var newSocket: Socket?
         do {
-            if reconnect {
-                socket?.close()
-                socket = nil
-            }
-
-            newSocket = try Socket.create(
-                family: .unix,
-                type: .stream,
-                proto: .unix
-            )
-            try newSocket?.connect(to: socket_path)
+            newSocket = try createSocket()
             guard !isStopping else {
                 newSocket?.close()
                 return false
             }
-            socket = newSocket
+            newSocket?.close()
             stopReconnectLoop()
             setSocketConnected(true)
-            logger.info("connect to socket \(socket_path)")
+            logger.info("connect to socket \(self.socketPath)")
             return true
         } catch let error {
             newSocket?.close()
-            socket = nil
             setSocketConnected(false)
             logger.error("Unexpected error: \(error.localizedDescription)")
             startReconnectLoop()
@@ -589,9 +669,6 @@ class SwipeManager {
     private func stopConnectionState() {
         isStopping = true
         stopReconnectLoop()
-
-        socket?.close()
-        socket = nil
         setSocketConnected(false)
     }
 
