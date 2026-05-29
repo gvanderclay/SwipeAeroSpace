@@ -122,13 +122,11 @@ class SwipeManager {
     private var reconnecting: Bool = false
     private var reconnectWorkItem: DispatchWorkItem? = nil
     private var reconnectGeneration: Int = 0
-    private var healthCheckWorkItem: DispatchWorkItem? = nil
-    private var healthCheckGeneration: Int = 0
     private var isStopping: Bool = false
     private let initialReconnectDelay: TimeInterval = 1
     private let maxReconnectDelay: TimeInterval = 30
-    private let healthCheckInterval: TimeInterval = 5
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
+    private let workQueueKey = DispatchSpecificKey<Void>()
     private let overlayController = OverlayPanelController()
 
     private var logger: Logger = Logger(
@@ -136,8 +134,16 @@ class SwipeManager {
         category: "Info"
     )
 
+    init() {
+        workQueue.setSpecific(key: workQueueKey, value: ())
+    }
+
     deinit {
         stop()
+    }
+
+    private var isOnWorkQueue: Bool {
+        DispatchQueue.getSpecific(key: workQueueKey) != nil
     }
 
     private func setSocketConnected(_ connected: Bool) {
@@ -153,7 +159,6 @@ class SwipeManager {
     private func handleConnectionFailure() {
         socket?.close()
         socket = nil
-        stopHealthChecks()
         setSocketConnected(false)
         startReconnectLoop()
     }
@@ -183,7 +188,7 @@ class SwipeManager {
             }
 
             self.logger.info("Trying reconnect socket...")
-            if self.connectSocket(reconnect: true) {
+            if self.connectSocketOnWorkQueue(reconnect: true) {
                 return
             }
 
@@ -200,50 +205,6 @@ class SwipeManager {
         reconnecting = false
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
-    }
-
-    private func startHealthChecks() {
-        guard !isStopping else { return }
-
-        healthCheckGeneration += 1
-        healthCheckWorkItem?.cancel()
-        scheduleHealthCheck(generation: healthCheckGeneration)
-    }
-
-    private func scheduleHealthCheck(generation: Int) {
-        guard !isStopping else { return }
-
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            guard !self.isStopping,
-                self.healthCheckGeneration == generation,
-                self.socket != nil,
-                !self.reconnecting
-            else {
-                return
-            }
-
-            _ = self.runCommand(args: ["list-workspaces", "--focused"], stdin: "")
-
-            guard !self.isStopping,
-                self.healthCheckGeneration == generation,
-                self.socket != nil,
-                !self.reconnecting
-            else {
-                return
-            }
-
-            self.scheduleHealthCheck(generation: generation)
-        }
-
-        healthCheckWorkItem = workItem
-        workQueue.asyncAfter(deadline: .now() + healthCheckInterval, execute: workItem)
-    }
-
-    private func stopHealthChecks() {
-        healthCheckGeneration += 1
-        healthCheckWorkItem?.cancel()
-        healthCheckWorkItem = nil
     }
 
     private func runCommand(args: [String], stdin: String, retry: Bool = false)
@@ -285,7 +246,7 @@ class SwipeManager {
                 return .failure(.SocketError(socketError.localizedDescription))
             }
             logger.info("Trying reconnect socket...")
-            if connectSocket(reconnect: true) {
+            if connectSocketOnWorkQueue(reconnect: true) {
                 return runCommand(args: args, stdin: stdin, retry: true)
             }
             return .failure(.SocketError(socketError.localizedDescription))
@@ -486,22 +447,40 @@ class SwipeManager {
     }
 
     func nextWorkspace() {
-        switch switchWorkspace(direction: .next) {
-        case .success: return
-        case .failure(let err): logger.error("\(err.localizedDescription)")
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            switch self.switchWorkspace(direction: .next) {
+            case .success: return
+            case .failure(let err): self.logger.error("\(err.localizedDescription)")
+            }
         }
     }
 
     func prevWorkspace() {
-        switch switchWorkspace(direction: .prev) {
-        case .success: return
-        case .failure(let err): logger.error("\(err.localizedDescription)")
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            switch self.switchWorkspace(direction: .prev) {
+            case .success: return
+            case .failure(let err): self.logger.error("\(err.localizedDescription)")
+            }
         }
 
     }
 
     @discardableResult
     func connectSocket(reconnect: Bool = false) -> Bool {
+        if isOnWorkQueue {
+            return connectSocketOnWorkQueue(reconnect: reconnect)
+        }
+
+        workQueue.async { [weak self] in
+            _ = self?.connectSocketOnWorkQueue(reconnect: reconnect)
+        }
+        return false
+    }
+
+    @discardableResult
+    private func connectSocketOnWorkQueue(reconnect: Bool = false) -> Bool {
         guard !isStopping else { return false }
 
         if socket != nil && !reconnect {
@@ -530,14 +509,11 @@ class SwipeManager {
             socket = newSocket
             stopReconnectLoop()
             setSocketConnected(true)
-            startHealthChecks()
             logger.info("connect to socket \(socket_path)")
             return true
         } catch let error {
             newSocket?.close()
-            socket?.close()
             socket = nil
-            stopHealthChecks()
             setSocketConnected(false)
             logger.error("Unexpected error: \(error.localizedDescription)")
             startReconnectLoop()
@@ -550,7 +526,6 @@ class SwipeManager {
             logger.warning("SwipeManager is already started")
             return
         }
-        isStopping = false
         logger.info("SwipeManager start")
         eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
@@ -581,14 +556,45 @@ class SwipeManager {
         )
         CGEvent.tapEnable(tap: eventTap!, enable: true)
 
-        connectSocket()
+        workQueue.async { [weak self] in
+            self?.startConnectionState()
+        }
     }
 
     func stop() {
         logger.info("stop the app")
+        stopEventTap()
+
+        if isOnWorkQueue {
+            stopConnectionState()
+        } else {
+            workQueue.sync {
+                stopConnectionState()
+            }
+        }
+    }
+
+    private func startConnectionState() {
+        isStopping = false
+        _ = connectSocketOnWorkQueue()
+    }
+
+    private func stopConnectionState() {
         isStopping = true
         stopReconnectLoop()
-        stopHealthChecks()
+
+        socket?.close()
+        socket = nil
+        setSocketConnected(false)
+    }
+
+    private func stopEventTap() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.sync { [self] in
+                stopEventTap()
+            }
+            return
+        }
 
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
@@ -605,10 +611,6 @@ class SwipeManager {
         }
         eventTap = nil
         runLoopSource = nil
-
-        socket?.close()
-        socket = nil
-        setSocketConnected(false)
     }
 
     private func eventHandler(
