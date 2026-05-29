@@ -15,6 +15,119 @@ struct WindowInfo: Identifiable {
     let windowTitle: String
 }
 
+class AppIconCache: ObservableObject {
+    static let shared = AppIconCache()
+
+    @Published private var icons: [String: NSImage] = [:]
+    private var loadingAppNames: Set<String> = []
+    private let queue = DispatchQueue(label: "app-icon-cache", qos: .userInitiated)
+
+    private static let placeholderIcon: NSImage = {
+        if let image = NSImage(
+            systemSymbolName: "app.dashed",
+            accessibilityDescription: "Application icon"
+        ) {
+            return image
+        }
+
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        image.lockFocus()
+        NSColor.tertiaryLabelColor.setFill()
+        NSBezierPath(
+            roundedRect: NSRect(x: 2, y: 2, width: 12, height: 12),
+            xRadius: 3,
+            yRadius: 3
+        ).fill()
+        image.unlockFocus()
+        return image
+    }()
+
+    private init() {}
+
+    func icon(for appName: String) -> NSImage {
+        let key = cacheKey(for: appName)
+        return icons[key] ?? Self.placeholderIcon
+    }
+
+    func loadIcon(for appName: String) {
+        let key = cacheKey(for: appName)
+        guard !key.isEmpty,
+            icons[key] == nil,
+            !loadingAppNames.contains(key)
+        else {
+            return
+        }
+
+        loadingAppNames.insert(key)
+        queue.async { [weak self] in
+            let icon = Self.resolveIcon(for: key)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.icons[key] = icon
+                self.loadingAppNames.remove(key)
+            }
+        }
+    }
+
+    private func cacheKey(for appName: String) -> String {
+        appName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func resolveIcon(for appName: String) -> NSImage {
+        guard let appURL = resolveApplicationURL(for: appName) else {
+            return placeholderIcon
+        }
+
+        return NSWorkspace.shared.icon(forFile: appURL.path)
+    }
+
+    private static func resolveApplicationURL(for appName: String) -> URL? {
+        for runningApp in NSWorkspace.shared.runningApplications
+        where appMatches(runningApp, appName: appName) {
+            if let url = runningApp.bundleURL {
+                return url
+            }
+        }
+
+        if let url = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: appName
+        ) {
+            return url
+        }
+
+        let appBundleName = appName.hasSuffix(".app") ? appName : "\(appName).app"
+        let fallbackRoots = [
+            "/Applications",
+            "/System/Applications",
+            "/System/Applications/Utilities",
+            "\(NSHomeDirectory())/Applications",
+        ]
+        for root in fallbackRoots {
+            let url = URL(fileURLWithPath: root).appendingPathComponent(appBundleName)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func appMatches(
+        _ runningApp: NSRunningApplication,
+        appName: String
+    ) -> Bool {
+        if runningApp.localizedName?.caseInsensitiveCompare(appName) == .orderedSame {
+            return true
+        }
+        if runningApp.bundleIdentifier?.caseInsensitiveCompare(appName) == .orderedSame {
+            return true
+        }
+        let bundleName = runningApp.bundleURL?
+            .deletingPathExtension()
+            .lastPathComponent
+        return bundleName?.caseInsensitiveCompare(appName) == .orderedSame
+    }
+}
+
 class OverlayState: ObservableObject {
     @Published var hoveredWorkspace: String? = nil
     @Published var workspaces: [WorkspaceInfo] = []
@@ -190,16 +303,7 @@ struct WorkspaceCard: View {
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(workspace.windows) { win in
-                        HStack(spacing: 5) {
-                            let icon = NSWorkspace.shared.icon(
-                                forFile: appPath(for: win.appName))
-                            Image(nsImage: icon)
-                                .resizable()
-                                .frame(width: 15, height: 15)
-                            Text(win.appName)
-                                .font(.system(size: 12))
-                                .lineLimit(1)
-                        }
+                        WindowRow(window: win)
                     }
                 }
             }
@@ -224,9 +328,27 @@ struct WorkspaceCard: View {
         }
         .contentShape(Rectangle())
     }
+}
 
-    private func appPath(for appName: String) -> String {
-        "/Applications/\(appName).app"
+private struct WindowRow: View {
+    let window: WindowInfo
+    @ObservedObject private var iconCache = AppIconCache.shared
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(nsImage: iconCache.icon(for: window.appName))
+                .resizable()
+                .frame(width: 15, height: 15)
+            Text(window.appName)
+                .font(.system(size: 12))
+                .lineLimit(1)
+        }
+        .onAppear {
+            iconCache.loadIcon(for: window.appName)
+        }
+        .onChange(of: window.appName) { appName in
+            iconCache.loadIcon(for: appName)
+        }
     }
 }
 

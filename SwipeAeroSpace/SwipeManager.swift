@@ -628,7 +628,10 @@ class SwipeManager {
             || eventType == .tapDisabledByTimeout
         {
             logger.info("SwipeManager tap disabled \(eventType.rawValue)")
-            CGEvent.tapEnable(tap: eventTap!, enable: true)
+            guard let tap = eventTap else {
+                return Unmanaged.passUnretained(cgEvent)
+            }
+            CGEvent.tapEnable(tap: tap, enable: true)
         }
         return Unmanaged.passUnretained(cgEvent)
     }
@@ -734,6 +737,8 @@ class SwipeManager {
                     // Cancel any pending work so we don't overshoot
                     pendingSwipeWork?.cancel()
 
+                    let skipEmpty = self.skipEmpty
+                    let wrap = self.wrapWorkspace
                     let workItem = DispatchWorkItem { [weak self] in
                         guard let self = self else { return }
 
@@ -750,7 +755,7 @@ class SwipeManager {
                         }
 
                         let nonEmptyWorkspaces: String?
-                        if self.skipEmpty {
+                        if skipEmpty {
                             if let cachedNonEmptyWorkspaces = self.cachedNonEmptyWorkspaces {
                                 nonEmptyWorkspaces = cachedNonEmptyWorkspaces
                             } else {
@@ -767,10 +772,10 @@ class SwipeManager {
                         for _ in 0..<stepsToFire {
                             var args = ["workspace", direction.value]
                             var stdin = ""
-                            if self.wrapWorkspace {
+                            if wrap {
                                 args.append("--wrap-around")
                             }
-                            if self.skipEmpty {
+                            if skipEmpty {
                                 if let ws = nonEmptyWorkspaces, !ws.isEmpty {
                                     stdin = ws
                                     args.append("--stdin")

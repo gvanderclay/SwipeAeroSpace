@@ -5,6 +5,7 @@
 //  Created by Tricster on 1/25/25.
 //
 
+import Cocoa
 import SwiftUI
 
 @available(macOS 14.0, *)
@@ -22,14 +23,24 @@ func checkAccessibilityPermissions() {
     let options = [
         kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true
     ]
-    if !AXIsProcessTrustedWithOptions(options as CFDictionary) {
-        _ = try? Process.run(
-            URL(filePath: "/usr/bin/tccutil"),
-            arguments: [
-                "reset", "Accessibility", "club.mediosz.SwipeAeroSpace",
-            ]
+    guard !AXIsProcessTrustedWithOptions(options as CFDictionary) else {
+        return
+    }
+
+    let alert = NSAlert()
+    alert.messageText = "Accessibility Permission Required"
+    alert.informativeText =
+        "SwipeAeroSpace needs Accessibility permission to read trackpad gestures and switch AeroSpace workspaces."
+    alert.addButton(withTitle: "Open System Settings")
+    alert.addButton(withTitle: "Not Now")
+
+    if alert.runModal() == .alertFirstButtonReturn {
+        NSWorkspace.shared.open(
+            URL(
+                string:
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            )!
         )
-        NSApplication.shared.terminate(nil)
     }
 }
 
@@ -43,8 +54,10 @@ struct SwipeAeroSpaceApp: App {
         AppSettings.migrateLegacyKeys()
         let swipeManager = SwipeManager()
         _swipeManager = State(initialValue: swipeManager)
-        checkAccessibilityPermissions()
         swipeManager.start()
+        DispatchQueue.main.async {
+            checkAccessibilityPermissions()
+        }
     }
 
     var body: some Scene {
