@@ -1,23 +1,21 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage("threshold") private static var swipeThreshold: Double = 1.0
-    @AppStorage("wrap") private var wrapWorkspace: Bool = false
-    @AppStorage("natrual") private var naturalSwipe: Bool = true
-    @AppStorage("skip-empty") private var skipEmpty: Bool = false
-    @AppStorage("fingers") private var fingers: String = "Three"
-    @AppStorage("multiSwipe") private var multiSwipeEnabled: Bool = true
-    @AppStorage("maxSteps") private var maxSteps: Int = 5
-    @AppStorage("swipeUpOverview") private var swipeUpOverviewEnabled: Bool = true
-    @AppStorage("swipeUpFingers") private var swipeUpFingers: String = "Three"
+    @AppStorage(SettingKey.threshold) private static var swipeThreshold: Double = SettingDefaults.threshold
+    @AppStorage(SettingKey.wrap) private var wrapWorkspace: Bool = SettingDefaults.wrap
+    @AppStorage(SettingKey.natural) private var naturalSwipe: Bool = SettingDefaults.natural
+    @AppStorage(SettingKey.skipEmpty) private var skipEmpty: Bool = SettingDefaults.skipEmpty
+    @AppStorage(SettingKey.fingers) private var fingers: String = SettingDefaults.fingers
+    @AppStorage(SettingKey.multiSwipe) private var multiSwipeEnabled: Bool = SettingDefaults.multiSwipe
+    @AppStorage(SettingKey.maxSteps) private var maxSteps: Int = SettingDefaults.maxSteps
+    @AppStorage(SettingKey.swipeUpOverview) private var swipeUpOverviewEnabled: Bool = SettingDefaults.swipeUpOverview
+    @AppStorage(SettingKey.swipeUpFingers) private var swipeUpFingers: String = SettingDefaults.swipeUpFingers
 
     @State private var numberFormatter: NumberFormatter = {
         var nf = NumberFormatter()
         nf.numberStyle = .decimal
         return nf
     }()
-
-    let fingerOptions = ["Three", "Four"]
 
     var swipeManager: SwipeManager
     @ObservedObject var socketInfo: SocketInfo
@@ -69,7 +67,9 @@ struct SettingsView: View {
                     description: "How many fingers trigger a horizontal workspace switch"
                 ) {
                     Picker("", selection: $fingers) {
-                        ForEach(fingerOptions, id: \.self) { Text($0) }
+                        ForEach(FingerCount.allCases) { finger in
+                            Text(finger.displayName).tag(finger.rawValue)
+                        }
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 140)
@@ -146,7 +146,9 @@ struct SettingsView: View {
                         description: "How many fingers trigger the workspace overview"
                     ) {
                         Picker("", selection: $swipeUpFingers) {
-                            ForEach(fingerOptions, id: \.self) { Text($0) }
+                            ForEach(FingerCount.allCases) { finger in
+                                Text(finger.displayName).tag(finger.rawValue)
+                            }
                         }
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 140)

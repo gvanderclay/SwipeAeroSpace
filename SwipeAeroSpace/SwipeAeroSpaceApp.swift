@@ -35,11 +35,14 @@ func checkAccessibilityPermissions() {
 
 @main
 struct SwipeAeroSpaceApp: App {
-    @AppStorage("menuBarExtraIsInserted") var menuBarExtraIsInserted = true
+    @AppStorage(SettingKey.menuBarExtraIsInserted) var menuBarExtraIsInserted = SettingDefaults.menuBarExtraIsInserted
     @Environment(\.openWindow) private var openWindow
-    @State var swipeManager = SwipeManager()
+    @State var swipeManager: SwipeManager
 
     init() {
+        AppSettings.migrateLegacyKeys()
+        let swipeManager = SwipeManager()
+        _swipeManager = State(initialValue: swipeManager)
         checkAccessibilityPermissions()
         swipeManager.start()
     }

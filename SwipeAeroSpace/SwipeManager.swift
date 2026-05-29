@@ -92,16 +92,16 @@ extension Result {
 
 class SwipeManager {
     // user settings
-    @AppStorage("threshold") private var swipeThreshold: Double = 1.0
+    @AppStorage(SettingKey.threshold) private var swipeThreshold: Double = SettingDefaults.threshold
     private var internalThreshold: Float { Float(swipeThreshold) * 0.05 }
-    @AppStorage("wrap") private var wrapWorkspace: Bool = false
-    @AppStorage("natrual") private var naturalSwipe: Bool = true
-    @AppStorage("skip-empty") private var skipEmpty: Bool = false
-    @AppStorage("fingers") private var fingers: String = "Three"
-    @AppStorage("multiSwipe") private var multiSwipeEnabled: Bool = true
-    @AppStorage("maxSteps") private var maxSteps: Int = 5
-    @AppStorage("swipeUpOverview") private var swipeUpOverviewEnabled: Bool = true
-    @AppStorage("swipeUpFingers") private var swipeUpFingers: String = "Three"
+    @AppStorage(SettingKey.wrap) private var wrapWorkspace: Bool = SettingDefaults.wrap
+    @AppStorage(SettingKey.natural) private var naturalSwipe: Bool = SettingDefaults.natural
+    @AppStorage(SettingKey.skipEmpty) private var skipEmpty: Bool = SettingDefaults.skipEmpty
+    @AppStorage(SettingKey.fingers) private var fingers: String = SettingDefaults.fingers
+    @AppStorage(SettingKey.multiSwipe) private var multiSwipeEnabled: Bool = SettingDefaults.multiSwipe
+    @AppStorage(SettingKey.maxSteps) private var maxSteps: Int = SettingDefaults.maxSteps
+    @AppStorage(SettingKey.swipeUpOverview) private var swipeUpOverviewEnabled: Bool = SettingDefaults.swipeUpOverview
+    @AppStorage(SettingKey.swipeUpFingers) private var swipeUpFingers: String = SettingDefaults.swipeUpFingers
 
     var socketInfo = SocketInfo()
 
@@ -660,8 +660,8 @@ class SwipeManager {
     }
 
     private func processTouches(touches: Set<NSTouch>, count: Int) {
-        let hFingerCount = fingers == "Three" ? 3 : 4
-        let vFingerCount = swipeUpFingers == "Three" ? 3 : 4
+        let hFingerCount = FingerCount(rawValue: fingers)?.count ?? FingerCount.three.count
+        let vFingerCount = FingerCount(rawValue: swipeUpFingers)?.count ?? FingerCount.three.count
         if state != .began && (count == hFingerCount || count == vFingerCount) {
             state = .began
             activeFingerCount = count
