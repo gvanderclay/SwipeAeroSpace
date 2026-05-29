@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage(SettingKey.threshold) private static var swipeThreshold: Double = SettingDefaults.threshold
+    @AppStorage(SettingKey.threshold) private var swipeThreshold: Double = SettingDefaults.threshold
     @AppStorage(SettingKey.wrap) private var wrapWorkspace: Bool = SettingDefaults.wrap
     @AppStorage(SettingKey.natural) private var naturalSwipe: Bool = SettingDefaults.natural
     @AppStorage(SettingKey.skipEmpty) private var skipEmpty: Bool = SettingDefaults.skipEmpty
@@ -54,7 +54,7 @@ struct SettingsView: View {
                 ) {
                     TextField(
                         "Sensitivity",
-                        value: SettingsView.$swipeThreshold,
+                        value: $swipeThreshold,
                         formatter: numberFormatter,
                         prompt: Text("1.0")
                     )
@@ -76,8 +76,8 @@ struct SettingsView: View {
                 }
 
                 settingRow(
-                    title: "Natural Swipe",
-                    description: "Swipe direction matches finger movement, like trackpad scrolling"
+                    title: "Natural Swipe Direction",
+                    description: "On: left moves to next and right to previous (content follows fingers, like trackpad scrolling). Off: left moves to previous and right to next."
                 ) {
                     Toggle("", isOn: $naturalSwipe)
                         .labelsHidden()

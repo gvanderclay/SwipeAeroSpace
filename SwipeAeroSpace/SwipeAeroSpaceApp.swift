@@ -47,13 +47,18 @@ func checkAccessibilityPermissions() {
 @main
 struct SwipeAeroSpaceApp: App {
     @AppStorage(SettingKey.menuBarExtraIsInserted) var menuBarExtraIsInserted = SettingDefaults.menuBarExtraIsInserted
+    @AppStorage(SettingKey.fingers) private var fingers: String = SettingDefaults.fingers
+    @AppStorage(SettingKey.swipeUpOverview) private var swipeUpOverviewEnabled: Bool = SettingDefaults.swipeUpOverview
+    @AppStorage(SettingKey.swipeUpFingers) private var swipeUpFingers: String = SettingDefaults.swipeUpFingers
     @Environment(\.openWindow) private var openWindow
     @State var swipeManager: SwipeManager
+    @StateObject private var socketInfo: SocketInfo
 
     init() {
         AppSettings.migrateLegacyKeys()
         let swipeManager = SwipeManager()
         _swipeManager = State(initialValue: swipeManager)
+        _socketInfo = StateObject(wrappedValue: swipeManager.socketInfo)
         swipeManager.start()
         DispatchQueue.main.async {
             checkAccessibilityPermissions()
@@ -62,10 +67,28 @@ struct SwipeAeroSpaceApp: App {
 
     var body: some Scene {
         MenuBarExtra(
-            "Screenshots",
+            "SwipeAeroSpace",
             image: "MenubarIcon",
             isInserted: $menuBarExtraIsInserted
         ) {
+            Label(
+                socketInfo.socketConnected ? "Connected to AeroSpace" : "Not connected",
+                systemImage: socketInfo.socketConnected
+                    ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+            )
+            if !socketInfo.socketConnected {
+                Button("Reconnect") {
+                    swipeManager.connectSocket(reconnect: true)
+                }
+            }
+            Divider()
+
+            Text("Horizontal: \(horizontalFingerDisplay)-finger swipe")
+            if swipeUpOverviewEnabled {
+                Text("Overview: \(overviewFingerDisplay)-finger swipe up")
+            }
+            Divider()
+
             Button("Workspace Overview") {
                 swipeManager.showWorkspaceOverview()
             }
@@ -108,12 +131,20 @@ struct SwipeAeroSpaceApp: App {
         Settings {
             SettingsView(
                 swipeManager: swipeManager,
-                socketInfo: swipeManager.socketInfo
+                socketInfo: socketInfo
             )
         }.windowResizability(.contentSize)
 
         WindowGroup(id: "about") {
             AboutView()
         }.windowResizability(.contentSize)
+    }
+
+    private var horizontalFingerDisplay: String {
+        FingerCount(rawValue: fingers)?.displayName ?? FingerCount.three.displayName
+    }
+
+    private var overviewFingerDisplay: String {
+        FingerCount(rawValue: swipeUpFingers)?.displayName ?? FingerCount.three.displayName
     }
 }
