@@ -467,16 +467,15 @@ class SwipeManager {
 
     }
 
-    @discardableResult
-    func connectSocket(reconnect: Bool = false) -> Bool {
+    func connectSocket(reconnect: Bool = false) {
         if isOnWorkQueue {
-            return connectSocketOnWorkQueue(reconnect: reconnect)
+            _ = connectSocketOnWorkQueue(reconnect: reconnect)
+            return
         }
 
         workQueue.async { [weak self] in
             _ = self?.connectSocketOnWorkQueue(reconnect: reconnect)
         }
-        return false
     }
 
     @discardableResult
@@ -561,6 +560,9 @@ class SwipeManager {
         }
     }
 
+    /// Must be called from the main thread (menubar Quit / deinit). It uses
+    /// `workQueue.sync` for connection teardown while `stopEventTap()` uses
+    /// `DispatchQueue.main.sync`; calling this from `workQueue` would deadlock.
     func stop() {
         logger.info("stop the app")
         stopEventTap()
