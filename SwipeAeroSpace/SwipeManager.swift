@@ -116,6 +116,7 @@ class SwipeManager {
     private var activeFingerCount: Int = 0
     private var gestureFocusDone: Bool = false
     private var pendingSwipeWork: DispatchWorkItem? = nil
+    private var cachedNonEmptyWorkspaces: String? = nil
     private var socket: Socket? = nil
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
     private let overlayController = OverlayPanelController()
@@ -217,12 +218,8 @@ class SwipeManager {
                 )
             }
 
-            // Phase 2: fetch window details and update in place
-            let fullWorkspaces = self.queryWindows(for: shellWorkspaces)
-            DispatchQueue.main.async {
-                guard self.overlayController.isVisible else { return }
-                self.overlayController.update(workspaces: fullWorkspaces)
-            }
+            // Phase 2: fetch window details and update each workspace as it arrives
+            self.queryWindows(for: shellWorkspaces)
         }
     }
 
@@ -287,8 +284,8 @@ class SwipeManager {
     }
 
     /// Fetch window details for a list of workspaces (1 socket call per workspace)
-    private func queryWindows(for workspaces: [WorkspaceInfo]) -> [WorkspaceInfo] {
-        return workspaces.map { ws in
+    private func queryWindows(for workspaces: [WorkspaceInfo]) {
+        for ws in workspaces {
             let winResult = runCommand(
                 args: [
                     "list-windows", "--workspace", ws.id,
@@ -313,13 +310,18 @@ class SwipeManager {
             } else {
                 windows = []
             }
-            return WorkspaceInfo(
+            let updatedWorkspace = WorkspaceInfo(
                 id: ws.id,
                 windows: windows,
                 isFocused: ws.isFocused,
                 monitorId: ws.monitorId,
                 monitorName: ws.monitorName
             )
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                guard self.overlayController.isVisible else { return }
+                self.overlayController.update(workspace: updatedWorkspace)
+            }
         }
     }
 
@@ -572,6 +574,20 @@ class SwipeManager {
                             self.gestureFocusDone = true
                         }
 
+                        let nonEmptyWorkspaces: String?
+                        if self.skipEmpty {
+                            if let cachedNonEmptyWorkspaces = self.cachedNonEmptyWorkspaces {
+                                nonEmptyWorkspaces = cachedNonEmptyWorkspaces
+                            } else {
+                                let fetchedNonEmptyWorkspaces =
+                                    (try? self.getNonEmptyWorkspaces().get())
+                                self.cachedNonEmptyWorkspaces = fetchedNonEmptyWorkspaces
+                                nonEmptyWorkspaces = fetchedNonEmptyWorkspaces
+                            }
+                        } else {
+                            nonEmptyWorkspaces = nil
+                        }
+
                         // Fire only the lean next/prev calls
                         for _ in 0..<stepsToFire {
                             var args = ["workspace", direction.value]
@@ -580,7 +596,7 @@ class SwipeManager {
                                 args.append("--wrap-around")
                             }
                             if self.skipEmpty {
-                                if let ws = try? self.getNonEmptyWorkspaces().get(), !ws.isEmpty {
+                                if let ws = nonEmptyWorkspaces, !ws.isEmpty {
                                     stdin = ws
                                     args.append("--stdin")
                                 }
@@ -608,6 +624,7 @@ class SwipeManager {
         swipeAxis = .undecided
         activeFingerCount = 0
         gestureFocusDone = false
+        cachedNonEmptyWorkspaces = nil
         prevTouchPositions.removeAll()
     }
 

@@ -20,6 +20,16 @@ class OverlayState: ObservableObject {
     @Published var workspaces: [WorkspaceInfo] = []
     @Published var visible: Bool = false
     @Published var focusedMonitorId: String? = nil
+
+    func update(workspace: WorkspaceInfo) {
+        var updatedWorkspaces = workspaces
+        if let index = updatedWorkspaces.firstIndex(where: { $0.id == workspace.id }) {
+            updatedWorkspaces[index] = workspace
+        } else {
+            updatedWorkspaces.append(workspace)
+        }
+        workspaces = updatedWorkspaces
+    }
 }
 
 struct WorkspaceOverlayView: View {
@@ -362,6 +372,10 @@ class OverlayPanelController {
 
     func update(workspaces: [WorkspaceInfo]) {
         overlayState.workspaces = workspaces
+    }
+
+    func update(workspace: WorkspaceInfo) {
+        overlayState.update(workspace: workspace)
     }
 
     func dismiss() {
